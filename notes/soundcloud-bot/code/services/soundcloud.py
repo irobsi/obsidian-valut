@@ -1,55 +1,131 @@
+import re
 import logging
+import requests
 import yt_dlp
+from typing import Optional, Tuple, List, Dict, Any
 
-# Configure logging
-logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
-def extract_track_info(url):
-    """
-    Extracts track information from a SoundCloud URL.
-    Raises ValueError if the URL is invalid or no downloadable URL is found.
-    """
-    if not url or not isinstance(url, str):
-        raise ValueError("Invalid URL provided.")
-    
-    # Basic URL validation for SoundCloud
-    if not (url.startswith("https://soundcloud.com/") or url.startswith("https://on.soundcloud.com/")):
-        raise ValueError("URL does not appear to be a valid SoundCloud link.")
+SC_URL_RE = re.compile(r'https?://(?:www\.|on\.)?soundcloud\.com/[^\s]+', re.IGNORECASE)
 
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'ignoreerrors': True,  # Kept to bypass DRM, but we check the result explicitly
-        'extract_flat': False,
-        'format': 'bestaudio/best',
+
+def is_sc_url(text: str) -> bool:
+    return bool(SC_URL_RE.search(text))
+
+
+def _resolve_short_url(url: str) -> str:
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        return r.url
+    except Exception:
+        return url
+
+
+def _extract_info(url: str) -> Optional[Dict[Any, Any]]:
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'ignoreerrors': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        logger.error(f"yt-dlp extraction failed for {url}: {e}")
+        return None
+
+
+def resolve_soundcloud_url(url: str) -> Optional[Dict[Any, Any]]:
+    url = _resolve_short_url(url)
+    info = _extract_info(url)
+    if not info:
+        return None
+    if info.get('_type') == 'playlist' and info.get('entries'):
+        entry = info['entries'][0] if info['entries'] else None
+        if entry:
+            entry['url'] = info.get('webpage_url', url)
+            return entry
+    return info
+
+
+def _entry_to_track(entry: Any) -> Optional[Dict[Any, Any]]:
+    if not entry:
+        return None
+    return {
+        'id': entry.get('id'),
+        'title': entry.get('title'),
+        'duration': entry.get('duration', 0) * 1000,
+        'url': entry.get('webpage_url') or entry.get('url'),
+        'user': {
+            'username': entry.get('uploader', 'SoundCloud')
+        },
+        'artwork_url': entry.get('thumbnail'),
     }
 
+
+def get_playlist_tracks(url: str) -> Tuple[str, List[Dict[Any, Any]]]:
+    url = _resolve_short_url(url)
+    info = _extract_info(url)
+    if not info:
+        return "", []
+    if info.get('_type') != 'playlist':
+        return info.get('title', 'Unknown'), [_entry_to_track(info)]
+    title = info.get('title', 'Unknown Playlist')
+    tracks = []
+    for entry in info.get('entries', []):
+        t = _entry_to_track(entry)
+        if t:
+            tracks.append(t)
+    return title, tracks
+
+
+def search_tracks(query: str, offset: int, limit: int) -> Tuple[List[Dict[Any, Any]], bool]:
+    search_url = f"scsearch{limit}:{query}"
+    info = _extract_info(search_url)
+    if not info:
+        return [], False
+    tracks = []
+    for entry in info.get('entries', []):
+        t = _entry_to_track(entry)
+        if t:
+            tracks.append(t)
+    has_more = len(tracks) == limit
+    return tracks, has_more
+
+
+def get_track_info(track_id: Any) -> Optional[Dict[Any, Any]]:
     try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'ignoreerrors': True,
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            if info is None:
-                raise ValueError("Could not extract track info (URL might be private or deleted).")
+            info = ydl.extract_info(f"scsearch1:{track_id}", download=False)
+            if info and info.get('entries'):
+                return _entry_to_track(info['entries'][0])
+    except Exception:
+        pass
+    return None
 
-            # Critical fix: Ensure we have a direct downloadable URL
-            track_url = info.get('url')
-            if not track_url:
-                # Fallback: sometimes it's under 'webpage_url' or we need to request a format
-                # yt-dlp usually provides 'url' for direct stream. If missing, raise error.
-                logger.error(f"No direct download URL found for: {url}. Info keys: {info.keys()}")
-                raise ValueError("Track is not downloadable (possibly requires authentication or DRM).")
 
-            # Build a clean result dict
-            return {
-                'title': info.get('title', 'Unknown Title'),
-                'uploader': info.get('uploader', 'Unknown Artist'),
-                'duration': info.get('duration', 0),
-                'url': track_url,  # The actual audio stream URL
-                'thumbnail': info.get('thumbnail'),
-            }
-
-    except Exception as e:
-        logger.error(f"yt-dlp extraction failed for {url}: {str(e)}")
-        # Re-raise a clean error for the bot to handle
-        raise ValueError(f"Failed to fetch track: {str(e)}")
+def extract_track_info(url: str) -> Dict[str, Any]:
+    if not url or not isinstance(url, str):
+        raise ValueError("Invalid URL provided.")
+    if not is_sc_url(url):
+        raise ValueError("URL does not appear to be a valid SoundCloud link.")
+    info = _extract_info(url)
+    if info is None:
+        raise ValueError("Could not extract track info (URL might be private or deleted).")
+    track_url = info.get('url')
+    if not track_url:
+        raise ValueError("Track is not downloadable (possibly requires authentication or DRM).")
+    return {
+        'title': info.get('title', 'Unknown Title'),
+        'uploader': info.get('uploader', 'Unknown Artist'),
+        'duration': info.get('duration', 0),
+        'url': track_url,
+        'thumbnail': info.get('thumbnail'),
+    }

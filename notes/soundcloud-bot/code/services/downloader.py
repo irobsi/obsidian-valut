@@ -1,90 +1,56 @@
-import asyncio
 import logging
 import os
-import re
-from pathlib import Path
 import yt_dlp
-from soundcloud import extract_track_info
 
 logger = logging.getLogger(__name__)
 
-# Allowed characters for filenames
-def sanitize_filename(name):
-    return re.sub(r'[<>:"/\\|?*]', '_', name).strip()
 
-async def download_track_audio(track_url, output_dir="downloads"):
+def download_track_audio(track_data: dict, mp3_path: str) -> bool:
     """
-    Downloads the audio from a SoundCloud URL asynchronously.
-    Returns: (file_path, error_message)
-    If successful: (Path_object, None)
-    If failed: (None, "Error description")
+    Downloads a SoundCloud track to the given mp3_path.
+    Returns True on success, False on failure.
     """
-    # 1. Validate input
-    if not track_url or not isinstance(track_url, str):
-        return None, "Invalid URL provided."
+    url = track_data.get('url')
+    if not url:
+        logger.error("No URL in track_data")
+        return False
 
-    # 2. Ensure directory exists
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_dir = os.path.dirname(mp3_path) or "."
+    base = os.path.splitext(os.path.basename(mp3_path))[0]
 
-    # 3. Run the heavy yt-dlp work in a separate thread to avoid blocking the asyncio loop
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': os.path.join(output_dir, f"{base}.%(ext)s"),
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,
+    }
+
     try:
-        # Fetch info first (with validation)
-        try:
-            track_info = await asyncio.to_thread(extract_track_info, track_url)
-        except ValueError as e:
-            return None, str(e)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
-        # 4. Prepare filename
-        safe_title = sanitize_filename(track_info['title'])
-        safe_artist = sanitize_filename(track_info['uploader'])
-        base_filename = f"{safe_artist} - {safe_title}"
-        output_path = Path(output_dir) / f"{base_filename}.mp3"
+        # Check if the file exists (yt-dlp may use different naming)
+        if os.path.exists(mp3_path):
+            return True
 
-        # 5. Set yt-dlp options with explicit outtmpl and error handling
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': str(Path(output_dir) / f"{base_filename}.%(ext)s"),
-            'quiet': True,
-            'no_warnings': True,
-            'overwrites': True,  # Overwrite if exists to avoid duplicates
-        }
+        # Try glob fallback
+        import glob
+        pattern = os.path.join(output_dir, f"{base}*.mp3")
+        files = glob.glob(pattern)
+        if files:
+            # Rename to expected path
+            os.rename(files[0], mp3_path)
+            return True
 
-        # 6. Execute download
-        def _sync_download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                error_code = ydl.download([track_url])
-                if error_code != 0:
-                    raise RuntimeError(f"yt-dlp exited with code {error_code}")
-            
-            # Check if the file actually exists
-            expected_file = Path(output_dir) / f"{base_filename}.mp3"
-            if not expected_file.exists():
-                # Sometimes yt-dlp appends a number or uses a different format. Let's glob it.
-                import glob
-                pattern = str(Path(output_dir) / f"{base_filename}*.mp3")
-                files = glob.glob(pattern)
-                if files:
-                    return Path(files[0])
-                else:
-                    raise FileNotFoundError("Download completed but output file not found.")
-            return expected_file
+        logger.error("Download completed but output file not found")
+        return False
 
-        # Run the blocking download in a thread
-        downloaded_file = await asyncio.to_thread(_sync_download)
-        
-        if not downloaded_file or not downloaded_file.exists():
-            return None, "Download succeeded but file is missing."
-
-        return downloaded_file, None
-
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"yt-dlp download error: {e}")
-        return None, f"Download error: {str(e)}"
     except Exception as e:
-        logger.error(f"Unexpected download error: {e}")
-        return None, f"An unexpected error occurred: {str(e)}"
+        logger.error(f"Download failed: {e}")
+        return False
