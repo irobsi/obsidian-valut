@@ -1,0 +1,17 @@
+# Environment variables (CRITICAL)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Downloads folder
+downloads/
+*.mp3
+*.webm
+*.m4a
+
+# IDE
+.vscode/
+.idea/

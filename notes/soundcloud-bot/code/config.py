@@ -1,4 +1,10 @@
-BOT_TOKEN = "8912423296:AAFvKp1XQ0ndY6Ch2i0jeo2t2GIHTKNR-2c"
-ALLOWED_USER_IDS = [7747086163, 6605229065, 1994789266]
-PAGE_SIZE = 8
-SEARCH_PAGE_SIZE = 10
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is not set in the .env file! Please add it.")
